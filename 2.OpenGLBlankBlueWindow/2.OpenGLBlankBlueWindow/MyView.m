@@ -150,12 +150,11 @@
     // code
     return([CAEAGLLayer class]); //return class which indicates we want to do animation
     //core animation embedded Apple GL(opengl es)
-    //this method will called by super class, and ultimately it called bu Cocoa Touch and ultimately iOS
+    //this method will called by super class, and ultimately it called by Cocoa Touch and ultimately iOS
 }
 
 -(void)drawView:(id)sender
 {
-    // code
     [EAGLContext setCurrentContext:eaglContext];
     
     glBindFramebuffer(GL_FRAMEBUFFER,defaultFramebuffer);
@@ -168,7 +167,6 @@
 
 -(void)layoutSubviews  // equivalent to resize() function
 {
-    // code
     GLint width;
     GLint height;
     
@@ -192,6 +190,7 @@
     }
     
     glViewport(0,0,width,height);
+
     // ortho or perspective code below
     
     [self drawView:nil]; // in webgl, Android,iphone resize does not call paint implicitly so we need to call it explicitly.

@@ -1,0 +1,653 @@
+//
+//  MyView.m
+//  3.TriangleOrtho
+//
+//  Created by Vaibhav Zodge on 07/06/18.
+//  Copyright © 2018 Vaibhav Zodge. All rights reserved.
+//
+
+#import "MyView.h"
+
+enum
+{
+    VVZ_ATTRIBUTE_VERTEX = 0,
+    VVZ_ATTRIBUTE_COLOR,
+    VVZ_ATTRIBUTE_NORMAL,
+    VVZ_ATTRIBUTE_TEXTURE0,
+};
+
+@implementation MyView
+{
+    EAGLContext *eaglContext; //opengl context
+    
+    GLuint defaultFramebuffer; // frame buffer bind
+    GLuint colorRenderbuffer;
+    GLuint depthRenderbuffer;
+    
+    id displayLink; //CADisplayLink *displayLink
+    NSInteger animationFrameInterval;
+    BOOL isAnimating;
+    
+    GLuint vertextShaderObject;
+    GLuint fragmentShaderObject;
+    GLuint shaderProgramObject;
+
+    GLuint vao_quad;
+    GLuint vbo_quad_position;
+    GLuint vbo_quad_color;
+    GLuint vbo_quad_normals;
+    
+    GLuint gModelViewMatrixUniform,gProjectionMatrixUniform;
+    
+    GLuint gLdUniform, gKdUniform, gLightPositionUniform;
+    
+    GLuint gLkeyPressedUniform;
+    
+    bool gbLight,bIsLKeyPressed,bIsAKeyPressed,gbAnimate;
+
+    GLuint mvpUniform;
+    GLfloat angleRotate;
+    
+    vmath::mat4 perspectiveProjectionMatrix;
+}
+
+
+-(id)initWithFrame:(CGRect)frame;
+{
+    
+    self=[super initWithFrame:frame];
+    
+    if(self)
+    {
+        CAEAGLLayer *eaglLayer=(CAEAGLLayer *)super.layer; //super, give me  animation layer
+        //super.layer  , this . Syntax called property Syntax
+        // it can be written ad [super layer]
+        // properties are in Objective C are by default get and set methods. We dont need to explicitly mention get but need to mention for set.
+        //layer is nothing but pixelFormatAttribute
+        
+        eaglLayer.opaque=YES;  //[eaglLayer setOpaque:YES]
+        eaglLayer.drawableProperties=[NSDictionary dictionaryWithObjectsAndKeys:[NSNumber numberWithBool:FALSE],
+                                      kEAGLDrawablePropertyRetainedBacking,kEAGLColorFormatRGBA8,kEAGLDrawablePropertyColorFormat,nil];
+        //retain backing means, do you want to retain the property, we say no ad we are animation
+        //color format is 32  rgba8
+        
+        eaglContext=[[EAGLContext alloc]initWithAPI:kEAGLRenderingAPIOpenGLES3]; // create opengl context of version OpenGLES 3
+        if(eaglContext==nil)
+        {
+            [self release];
+            return(nil);
+        }
+        [EAGLContext setCurrentContext:eaglContext]; //set opengl context with current context
+        //setCurrentContext is static method
+        
+        //************************ Frame buffer creation
+        
+        glGenFramebuffers(1,&defaultFramebuffer); // generate frame buffer
+        glBindFramebuffer(GL_FRAMEBUFFER,defaultFramebuffer);
+        //outer circle of buffer creation done, draw by sir
+        
+        // rendering api to store so created buffer called renderer buffer
+        glGenRenderbuffers(1,&colorRenderbuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER,colorRenderbuffer);
+        //inner circle draw by sir for color buffer (or depth buffer)
+        
+        //context what are you going to store in render buffer? GL_RENDERBUFFER
+        //From where will you get data, fromDrawable
+        [eaglContext renderbufferStorage:GL_RENDERBUFFER fromDrawable:eaglLayer];
+        
+        //attach colorRenderBuffer to a specific point (receptor). Where should I store color buffer (small circle) in frame buffer (big circle)
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,colorRenderbuffer);
+        
+        
+        //*************** enable depth (or set depth buffer in frame buffer)
+        GLint backingWidth;
+        GLint backingHeight;
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER,GL_RENDERBUFFER_WIDTH,&backingWidth);// get width of render buffer, it gives by cgl/agl
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER,GL_RENDERBUFFER_HEIGHT,&backingHeight);
+        
+        glGenRenderbuffers(1,&depthRenderbuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER,depthRenderbuffer);
+        glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT16,backingWidth,backingHeight);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,depthRenderbuffer);
+        
+        if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)
+        {
+            printf("Failed To Create Complete Framebuffer Object %x\n",glCheckFramebufferStatus(GL_FRAMEBUFFER));
+            glDeleteFramebuffers(1,&defaultFramebuffer);
+            glDeleteRenderbuffers(1,&colorRenderbuffer);
+            glDeleteRenderbuffers(1,&depthRenderbuffer);
+            [self release] ;
+            return(nil);
+        }
+        
+        printf("Renderer : %s | GL Version : %s | GLSL Version : %s\n",glGetString(GL_RENDERER),glGetString(GL_VERSION),glGetString(GL_SHADING_LANGUAGE_VERSION));
+        
+        // hard coded initializations
+        isAnimating=NO;
+        animationFrameInterval=60; // default since iOS 8.2, frame per second. Before 8.2 it was 30. It set to 60 because HD's frame rate is 60
+        
+        // *************************** shader program start
+        
+        
+        //**************************************** Vertex shader **********************************************
+        vertextShaderObject = glCreateShader(GL_VERTEX_SHADER);
+        
+        const GLchar *vertexShaderSourceCode =
+        "#version 300 es"\
+        "\n"\
+        "in vec4 vPosition;" \
+        "in vec3 vNormal;" \
+        "uniform int u_LKeyPressed;" \
+        "uniform mat4 u_model_view_matrix;" \
+        "uniform mat4 u_projection_matrix;" \
+        /*Light intensity*/        "uniform vec3 u_Ld;" \
+        /*Light material*/        "uniform vec3 u_Kd;" \
+        "uniform vec4 u_light_position;" \
+        "out vec3 diffuse_light;" \
+        "void main(void)" \
+        "{" \
+        "if (u_LKeyPressed == 1)" \
+        "{" \
+        "vec4 eyeCoordinates = u_model_view_matrix * vPosition;" \
+        "vec3 tnorm = normalize(mat3(u_model_view_matrix) * vNormal);" \
+        "vec3 s = normalize(vec3(u_light_position - eyeCoordinates));" \
+        "diffuse_light = u_Ld * u_Kd * max(dot(s, tnorm), 0.0);" \
+        "}" \
+        "gl_Position = u_projection_matrix * u_model_view_matrix * vPosition;" \
+        "}";
+        
+        /*
+         Steps to calculate defuse light (this is done in vertex shader), it is done using observational mathmatics
+         1. First geometry position coordinate covert to eye space (eye co-ordinates)
+         2. Calculate Normal matrix, which is required to convert normals in to eye space (It is done by GLSL compiler internally under mat3 conversion.
+         3. Convert normals in to eye space.
+         4. Calculate source vector by substracting eyeCoordinates from light position.
+         5. Calculate diffuse_light, by multiply {ld * kd * "dot product of source vector and notmal vectors"}
+         */
+        
+        glShaderSource(vertextShaderObject, 1, (const GLchar **)&vertexShaderSourceCode, NULL);
+        
+        //******************* Compile Vertex shader
+        glCompileShader(vertextShaderObject);
+        
+        GLint iInfoLogLength = 0;
+        GLint iShaderCompiledStatus = 0;
+        char *szInfoLog = NULL;
+        glGetShaderiv(vertextShaderObject, GL_COMPILE_STATUS, &iShaderCompiledStatus);
+        if (iShaderCompiledStatus == GL_FALSE)
+        {
+            glGetShaderiv(vertextShaderObject, GL_INFO_LOG_LENGTH, &iInfoLogLength);
+            if (iInfoLogLength > 0)
+            {
+                szInfoLog = (char *)malloc(iInfoLogLength);
+                if (szInfoLog != NULL)
+                {
+                    GLsizei written;
+                    glGetShaderInfoLog(vertextShaderObject, iInfoLogLength, &written, szInfoLog);
+                    printf("***** Vertex Shader Compilation Log : %s\n", szInfoLog);
+                    free(szInfoLog);
+                    [self release];
+                }
+            }
+        }
+        
+        //**************************************** Fragment shader **********************************************
+        fragmentShaderObject = glCreateShader(GL_FRAGMENT_SHADER);
+        
+        const GLchar *fragmentShaderSourceCode =
+        "#version 300 es"\
+        "\n"\
+        "precision highp float;" \
+        "precision highp int;" \
+        "in vec3 diffuse_light;" \
+        "out vec4 FragColor;" \
+        "uniform int u_LKeyPressed;" \
+        "void main(void)" \
+        "{" \
+        "vec4 color;" \
+        "if (u_LKeyPressed == 1)" \
+        "{" \
+        "color = vec4(diffuse_light,1.0);" \
+        "}" \
+        "else" \
+        "{" \
+        "color = vec4(1.0, 1.0, 1.0, 1.0);" \
+        "}" \
+        "FragColor = color;" \
+        "}";
+        
+        glShaderSource(fragmentShaderObject, 1, (const GLchar **)&fragmentShaderSourceCode, NULL);
+        
+        //******************* Compile fragment shader
+        
+        glCompileShader(fragmentShaderObject);
+        glGetShaderiv(fragmentShaderObject, GL_COMPILE_STATUS, &iShaderCompiledStatus);
+        if (iShaderCompiledStatus == GL_FALSE)
+        {
+            glGetShaderiv(fragmentShaderObject, GL_INFO_LOG_LENGTH, &iInfoLogLength);
+            if (iInfoLogLength > 0)
+            {
+                szInfoLog = (char *)malloc(iInfoLogLength);
+                if (szInfoLog != NULL)
+                {
+                    GLsizei written;
+                    glGetShaderInfoLog(fragmentShaderObject, iInfoLogLength, &written, szInfoLog);
+                    printf("***** Fragment Shader Compilation Log : %s\n", szInfoLog);
+                    free(szInfoLog);
+                    
+                }
+            }
+        }
+        
+        //**************************************** Shader program attachment **********************************************
+        // Code from sir
+        
+        shaderProgramObject = glCreateProgram();
+        
+        // attach vertex shader to shader program
+        glAttachShader(shaderProgramObject, vertextShaderObject);
+        
+        // attach fragment shader to shader program
+        glAttachShader(shaderProgramObject, fragmentShaderObject);
+        
+        glBindAttribLocation(shaderProgramObject, VVZ_ATTRIBUTE_VERTEX, "vPosition");
+        glBindAttribLocation(shaderProgramObject, VVZ_ATTRIBUTE_NORMAL, "vNormal");
+
+
+        
+        //**************************************** Link Shader program **********************************************
+        glLinkProgram(shaderProgramObject);
+        GLint iShaderProgramLinkStatus = 0;
+        glGetProgramiv(shaderProgramObject, GL_LINK_STATUS, &iShaderProgramLinkStatus);
+        if (iShaderProgramLinkStatus == GL_FALSE)
+        {
+            glGetProgramiv(shaderProgramObject, GL_INFO_LOG_LENGTH, &iInfoLogLength);
+            if (iInfoLogLength>0)
+            {
+                szInfoLog = (char *)malloc(iInfoLogLength);
+                if (szInfoLog != NULL)
+                {
+                    GLsizei written;
+                    glGetProgramInfoLog(shaderProgramObject, iInfoLogLength, &written, szInfoLog);
+                    printf("Shader Program Link Log : %s\n", szInfoLog);
+                    free(szInfoLog);
+                    [self release];
+                }
+            }
+        }
+        
+        //**************************************** END Link Shader program **********************************************
+        
+        gModelViewMatrixUniform = glGetUniformLocation(shaderProgramObject, "u_model_view_matrix");
+        gProjectionMatrixUniform = glGetUniformLocation(shaderProgramObject, "u_projection_matrix");
+        
+        gLkeyPressedUniform = glGetUniformLocation(shaderProgramObject, "u_LKeyPressed");
+        
+        gLdUniform = glGetUniformLocation(shaderProgramObject, "u_Ld");
+        gKdUniform = glGetUniformLocation(shaderProgramObject, "u_Kd");
+        gLightPositionUniform = glGetUniformLocation(shaderProgramObject, "u_light_position");
+
+        
+        //**************************************** Quads **********************************************
+        
+        const GLfloat quadVertices[] =
+        {
+            1.0f, 1.0f, -1.0f,  //right-top corner of top face
+            -1.0f, 1.0f, -1.0f, //left-top corner of top face
+            -1.0f, 1.0f, 1.0f, //left-bottom corner of top face
+            1.0f, 1.0f, 1.0f, //right-bottom corner of top face
+            
+            1.0f, -1.0f, -1.0f, //right-top corner of bottom face
+            -1.0f, -1.0f, -1.0f, //left-top corner of bottom face
+            -1.0f, -1.0f, 1.0f, //left-bottom corner of bottom face
+            1.0f, -1.0f, 1.0f, //right-bottom corner of bottom face
+            
+            1.0f, 1.0f, 1.0f, //right-top corner of front face
+            -1.0f, 1.0f, 1.0f, //left-top corner of front face
+            -1.0f, -1.0f, 1.0f, //left-bottom corner of front face
+            1.0f, -1.0f, 1.0f, //right-bottom corner of front face
+            
+            1.0f, 1.0f, -1.0f, //right-top of back face
+            -1.0f, 1.0f, -1.0f, //left-top of back face
+            -1.0f, -1.0f, -1.0f, //left-bottom of back face
+            1.0f, -1.0f, -1.0f, //right-bottom of back face
+            
+            1.0f, 1.0f, -1.0f, //right-top of right face
+            1.0f, 1.0f, 1.0f, //left-top of right face
+            1.0f, -1.0f, 1.0f, //left-bottom of right face
+            1.0f, -1.0f, -1.0f, //right-bottom of right face
+            
+            -1.0f, 1.0f, 1.0f, //right-top of left face
+            -1.0f, 1.0f, -1.0f, //left-top of left face
+            -1.0f, -1.0f, -1.0f, //left-bottom of left face
+            -1.0f, -1.0f, 1.0f, //right-bottom of left face
+        };
+        
+        glGenVertexArrays(1, &vao_quad);
+        glBindVertexArray(vao_quad);
+        
+        glGenBuffers(1, &vbo_quad_position);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_quad_position);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+        
+        glVertexAttribPointer(VVZ_ATTRIBUTE_VERTEX, 3, GL_FLOAT, GL_FALSE, 0, NULL);
+        
+        glEnableVertexAttribArray(VVZ_ATTRIBUTE_VERTEX);
+        
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+        
+        const GLfloat quadNormal[] =
+        {
+            0.0f, 1.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            
+            0.0f, -1.0f, 0.0f,
+            0.0f, -1.0f, 0.0f,
+            0.0f, -1.0f, 0.0f,
+            0.0f, -1.0f, 0.0f,
+            
+            0.0f, 0.0f, 1.0f,
+            0.0f, 0.0f, 1.0f,
+            0.0f, 0.0f, 1.0f,
+            0.0f, 0.0f, 1.0f,
+            
+            0.0f, 0.0f, -1.0f,
+            0.0f, 0.0f, -1.0f,
+            0.0f, 0.0f, -1.0f,
+            0.0f, 0.0f, -1.0f,
+            
+            -1.0f, 0.0f, 0.0f,
+            -1.0f, 0.0f, 0.0f,
+            -1.0f, 0.0f, 0.0f,
+            -1.0f, 0.0f, 0.0f,
+            
+            1.0f, 0.0f, 0.0f,
+            1.0f, 0.0f, 0.0f,
+            1.0f, 0.0f, 0.0f,
+            1.0f, 0.0f, 0.0f
+        };
+        
+        glBindVertexArray(vao_quad);
+        
+        glGenBuffers(1, &vbo_quad_color);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_quad_color);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quadNormal), quadNormal, GL_STATIC_DRAW);
+        
+        glVertexAttribPointer(VVZ_ATTRIBUTE_NORMAL, 3, GL_FLOAT, GL_FALSE, 0, NULL);
+        
+        glEnableVertexAttribArray(VVZ_ATTRIBUTE_NORMAL);
+        
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+        
+        //*************************************************
+        
+        
+        //glShadeModel(GL_SMOOTH);
+        
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        // glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);
+        //glEnable(GL_CULL_FACE);
+        
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        
+        perspectiveProjectionMatrix = vmath::mat4::identity();
+
+        
+        // GESTURE RECOGNITION
+        // Tap gesture code
+        UITapGestureRecognizer *singleTapGestureRecognizer=[[UITapGestureRecognizer alloc]initWithTarget:self action:@selector(onSingleTap:)];
+        [singleTapGestureRecognizer setNumberOfTapsRequired:1];
+        [singleTapGestureRecognizer setNumberOfTouchesRequired:1]; // touch of 1 finger
+        [singleTapGestureRecognizer setDelegate:self];
+        [self addGestureRecognizer:singleTapGestureRecognizer];
+        
+        UITapGestureRecognizer *doubleTapGestureRecognizer=[[UITapGestureRecognizer alloc]initWithTarget:self action:@selector(onDoubleTap:)];
+        [doubleTapGestureRecognizer setNumberOfTapsRequired:2];
+        [doubleTapGestureRecognizer setNumberOfTouchesRequired:1]; // touch of 1 finger
+        [doubleTapGestureRecognizer setDelegate:self];
+        [self addGestureRecognizer:doubleTapGestureRecognizer];
+        
+        // this will allow to differentiate between single tap and double tap
+        [singleTapGestureRecognizer requireGestureRecognizerToFail:doubleTapGestureRecognizer];
+        
+        // swipe gesture
+        UISwipeGestureRecognizer *swipeGestureRecognizer=[[UISwipeGestureRecognizer alloc]initWithTarget:self action:@selector(onSwipe:)];
+        [self addGestureRecognizer:swipeGestureRecognizer];
+        
+        // long-press gesture
+        UILongPressGestureRecognizer *longPressGestureRecognizer=[[UILongPressGestureRecognizer alloc]initWithTarget:self action:@selector(onLongPress:)];
+        [self addGestureRecognizer:longPressGestureRecognizer];
+    }
+    return(self);
+}
+
+/*
+ // Only override drawRect: if you perform custom drawing.
+ // An empty implementation adversely affects performance during animation.
+ - (void)drawRect:(CGRect)rect
+ {
+ // Drawing code
+ }
+ */
+
++(Class)layerClass
+{
+    // code
+    return([CAEAGLLayer class]); //return class which indicates we want to do animation
+    //core animation embedded Apple GL(opengl es)
+    //this method will called by super class, and ultimately it called by Cocoa Touch and ultimately iOS
+}
+
+-(void)drawView:(id)sender
+{
+    [self updateAngle];
+    
+    [EAGLContext setCurrentContext:eaglContext];
+    
+    glBindFramebuffer(GL_FRAMEBUFFER,defaultFramebuffer);
+    
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    
+    glUseProgram(shaderProgramObject);
+    
+    if (gbLight == true)
+    {
+        glUniform1i(gLkeyPressedUniform, 1);
+        
+        glUniform3f(gLdUniform, 1.0f, 1.0f, 1.0f);
+        glUniform3f(gKdUniform, 0.5f, 0.5f, 0.5f);
+        
+        float lightPosition[] = { 0.0f, 0.0f, 2.0f, 1.0f };
+        glUniform4fv(gLightPositionUniform, 1, (GLfloat *)lightPosition);
+    }
+    else
+    {
+        glUniform1i(gLkeyPressedUniform, 0);
+    }
+
+    
+    vmath::mat4 modelViewMatrix = vmath::mat4::identity();
+    vmath::mat4 modelMatrix = vmath::mat4::identity();
+    vmath::mat4 rotationMatric = vmath::mat4::identity();
+
+    
+    modelMatrix=vmath::translate(0.0f, 0.0f, -5.0f);
+    rotationMatric=vmath::rotate(angleRotate, 1.0f, 0.0f,0.0f);
+    modelViewMatrix=modelMatrix*rotationMatric;
+    
+    // pass modelview matrix to the vertex shader in 'u_model_view_matrix' shader variable
+    // whose position value we already calculated in initialize() by using glGetUniformLocation()
+    glUniformMatrix4fv(gModelViewMatrixUniform, 1, GL_FALSE, modelViewMatrix);
+    
+    // pass projection matrix to the vertex shader in 'u_projection_matrix' shader variable
+    // whose position value we already calculated in initialize() by using glGetUniformLocation()
+    glUniformMatrix4fv(gProjectionMatrixUniform, 1, GL_FALSE, perspectiveProjectionMatrix);
+
+    glBindVertexArray(vao_quad);
+    
+    glDrawArrays(GL_TRIANGLE_FAN,0,4);
+    glDrawArrays(GL_TRIANGLE_FAN,4,4);
+    glDrawArrays(GL_TRIANGLE_FAN,8,4);
+    
+    glDrawArrays(GL_TRIANGLE_FAN,12,4);
+    glDrawArrays(GL_TRIANGLE_FAN,16,4);
+    glDrawArrays(GL_TRIANGLE_FAN,20,4);
+    
+    
+    glBindVertexArray(0);
+    glUseProgram(0);
+    
+    glBindRenderbuffer(GL_RENDERBUFFER,colorRenderbuffer);
+    [eaglContext presentRenderbuffer:GL_RENDERBUFFER];
+}
+
+-(void)layoutSubviews  // equivalent to resize() function
+{
+    GLint width;
+    GLint height;
+    
+    
+    // after resize window, we need to remove frame buffer and create new frame buffer with new Width and height
+    glBindRenderbuffer(GL_RENDERBUFFER,colorRenderbuffer);
+    [eaglContext renderbufferStorage:GL_RENDERBUFFER fromDrawable:(CAEAGLLayer*)self.layer];
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER,GL_RENDERBUFFER_WIDTH,&width);
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER,GL_RENDERBUFFER_HEIGHT,&height);
+    
+    glGenRenderbuffers(1,&depthRenderbuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER,depthRenderbuffer);
+    glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT16,width,height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,depthRenderbuffer);
+    
+    
+    
+    if(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    {
+        printf("Failed To Create Complete Framebuffer Object %x", glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    }
+    
+    
+    glViewport(0,0,width,height);
+    
+    GLfloat fWidth = (GLfloat)width;
+    GLfloat fHeight = (GLfloat)height;
+    
+    perspectiveProjectionMatrix = vmath::perspective(45, fWidth/fHeight, 0.1f, 100.0f);
+
+//    if (width <= height)
+//        orthoGraphicProjectionMatrix = vmath::ortho(-100.0f, 100.0f, (-100.0f * (fHeight / fWidth)), (100.0f * (fHeight / fWidth)), -100.0f, 100.0f);
+//    else
+//        orthoGraphicProjectionMatrix = vmath::ortho((-100.0f * (fWidth / fHeight)), (100.0f * (fWidth / fHeight)), -100.0f, 100.0f, -100.0f, 100.0f);
+//
+    if(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    {
+        printf("Failed To Create Complete Framebuffer Object %x", glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    }
+    
+    [self drawView:nil]; // in webgl, Android,iphone resize does not call paint implicitly so we need to call it explicitly.
+}
+
+-(void)startAnimation // uset defined function. Need to declare thid in MyView.h
+{
+    if (!isAnimating)
+    {
+        displayLink=[NSClassFromString(@"CADisplayLink")displayLinkWithTarget:self selector:@selector(drawView:)];
+        //NSClassFromString is like reflection, get class from literal name
+        [displayLink setPreferredFramesPerSecond:animationFrameInterval];
+        [displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];// register to message/run loop
+        //tracking mode, event tracking mode, intrupts mode, and default mode
+        isAnimating=YES;
+    }
+}
+
+-(void)stopAnimation // uset defined function. Need to declare thid in MyView.h
+{
+    if(isAnimating)
+    {
+        [displayLink invalidate];// stop the display and take out of run loop
+        displayLink=nil;
+        
+        isAnimating=NO;
+    }
+}
+
+// to become first responder
+-(BOOL)acceptsFirstResponder
+{
+    // code
+    return(YES);
+}
+
+- (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event
+{
+    
+}
+
+-(void)onSingleTap:(UITapGestureRecognizer *)gr
+{
+    
+}
+
+-(void)onDoubleTap:(UITapGestureRecognizer *)gr
+{
+    if(gbLight==true)
+        gbLight=false;
+    else
+        gbLight=true;
+}
+
+-(void)onSwipe:(UISwipeGestureRecognizer *)gr
+{
+    // code
+    [self release];
+    exit(0);
+}
+
+-(void)onLongPress:(UILongPressGestureRecognizer *)gr
+{
+    
+}
+
+-(void)updateAngle
+{
+    angleRotate=angleRotate+1.0f;
+    if(angleRotate>360.0f)
+        angleRotate=0.0f;
+}
+
+- (void)dealloc
+{
+    // code
+    if(depthRenderbuffer)
+    {
+        glDeleteRenderbuffers(1,&depthRenderbuffer);
+        depthRenderbuffer=0;
+    }
+    
+    if(colorRenderbuffer)
+    {
+        glDeleteRenderbuffers(1,&colorRenderbuffer);
+        colorRenderbuffer=0;
+    }
+    
+    if(defaultFramebuffer)
+    {
+        glDeleteFramebuffers(1,&defaultFramebuffer);
+        defaultFramebuffer=0;
+    }
+    
+    if([EAGLContext currentContext]==eaglContext)
+    {
+        [EAGLContext setCurrentContext:nil];
+    }
+    [eaglContext release];
+    eaglContext=nil;
+    
+    [super dealloc];
+}
+
+@end
